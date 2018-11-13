@@ -3,6 +3,7 @@ package registry
 import (
 	"errors"
 	"net"
+	"time"
 
 	"github.com/iqoption/rpcng/plugin"
 	"github.com/iqoption/rpcng/registry"
@@ -52,5 +53,7 @@ func (p *serverPlugin) AfterStart(listener net.Listener, methods []string) error
 
 // Before stop
 func (p *serverPlugin) BeforeStop(listener net.Listener, methods []string) error {
-	return p.registry.Deregister(p.service.Id)
+	var err = p.registry.Deregister(p.service.Id)
+	time.Sleep(10 * time.Second) // give some time for clients to stop connects
+	return err
 }

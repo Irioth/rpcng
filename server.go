@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"time"
 
@@ -36,6 +35,9 @@ type Server struct {
 	// Stop wait group
 	stopWg sync.WaitGroup
 
+	// Workers wait group
+	requestsWg sync.WaitGroup
+
 	// Allowed methods
 	methods serverMethods
 
@@ -50,6 +52,9 @@ type Server struct {
 
 	// Requests pool
 	requestPool sync.Pool
+
+	// Max wait time for request completion
+	StopTimeout time.Duration
 }
 
 const (
@@ -58,6 +63,9 @@ const (
 
 	// DefaultPendingResponses is the default number of pending responses handled by Server
 	DefaultPendingResponses = 32 * 1024
+
+	// DefaultStopTimeout is max time awaiting completion of requests before stop server
+	DefaultStopTimeout = time.Minute
 )
 
 // Handler handler
@@ -131,6 +139,10 @@ func (s *Server) Start() (err error) {
 		s.PendingResponses = DefaultPendingResponses
 	}
 
+	if s.StopTimeout == 0 {
+		s.StopTimeout = DefaultStopTimeout
+	}
+
 	s.stopChan = make(chan struct{})
 	s.workerChain = make(chan struct{}, s.Concurrency)
 	s.requestPool.New = func() interface{} {
@@ -160,6 +172,8 @@ func (s *Server) Stop() (err error) {
 		return err
 	}
 
+	s.waitRequestsCompleted(s.StopTimeout)
+
 	defer func() { s.stopChan = nil }()
 	close(s.stopChan)
 
@@ -171,6 +185,19 @@ func (s *Server) Stop() (err error) {
 	}
 
 	return nil
+}
+
+func (s *Server) waitRequestsCompleted(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.requestsWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done: // All done!
+	case <-time.After(timeout): // Hit timeout.
+	}
 }
 
 // Is Server stopped
@@ -296,7 +323,6 @@ func (s *Server) connectionReader(reader io.Reader, responseChan chan *serverReq
 		case <-stopChan:
 			return
 		default:
-			runtime.Gosched()
 
 			request = s.requestPool.Get().(*serverRequest)
 
@@ -310,6 +336,9 @@ func (s *Server) connectionReader(reader io.Reader, responseChan chan *serverReq
 				return
 			}
 
+			if request.id != 0 {
+				s.requestsWg.Add(1)
+			}
 			go s.handleRequest(responseChan, request)
 		}
 	}
@@ -364,7 +393,6 @@ func (s *Server) connectionWriter(writer io.Writer, responseChan <-chan *serverR
 		case <-stopChan:
 			return
 		case request = <-responseChan:
-			runtime.Gosched()
 
 			if err = request.writeTo(writer); err != nil {
 				if s.isStopped() {
@@ -379,6 +407,7 @@ func (s *Server) connectionWriter(writer io.Writer, responseChan <-chan *serverR
 			s.requestPool.Put(
 				request.reset(),
 			)
+			s.requestsWg.Done()
 		}
 	}
 }
